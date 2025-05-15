@@ -4,6 +4,8 @@ Welcome to **Linear Regression MCP**! This project demonstrates an end-to-end ma
 
 **Claude** can train a **Linear Regression model** entirely by itself, simply by uploading a CSV file containing the dataset. The system goes through the entire **ML model training lifecycle**, handling data preprocessing, training, and evaluation (RMSE calculation).
 
+[![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/faff0b8f-a4c5-42f6-88c4-b3cb210f4559)
+
 <br>
 
 ## Setup and Installation
@@ -112,3 +114,4 @@ If you have any suggestions or feature requests, open an issue, and I'll be happ
         <img alt="Dev.to" src="https://img.shields.io/badge/gmail-%2312100E.svg?&style=for-the-badge&logo=gmail&logoColor=white" />
     </a>
 </p>
+
