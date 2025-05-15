@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/heetvekariya-linear-regression-mcp-badge.png)](https://mseep.ai/app/heetvekariya-linear-regression-mcp)
+
 # Linear Regression MCP
 
 Welcome to **Linear Regression MCP**! This project demonstrates an end-to-end machine learning workflow using Claude and the Model Context Protocol (MCP). 
