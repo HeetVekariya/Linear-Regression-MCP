@@ -1,34 +1,57 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 from mcp.server.fastmcp import FastMCP
 import pandas as pd
 import numpy as np
 import os
+import io
 
 # Initialize FastMCP server
-mcp = FastMCP("linear-regression")
+mcp = FastMCP("linear-regression-improved")
 
 @dataclass
-class DataContext():
+class DataContext:
     """
-    A class that stores the DataFrame in the context.
+    A class to store and manage the DataFrame in the context.
+    
+    This class holds the dataset and its original, unprocessed state, allowing for
+    re-runs of different preprocessing steps without reloading the file.
     """
     _data: pd.DataFrame = None
+    _original_data: pd.DataFrame = None
 
     def set_data(self, new_data: pd.DataFrame):
         """
-        Method to set or update the data.
+        Method to set or update the data, also backing up the original.
         """
-        self._data = new_data
+        self._original_data = new_data.copy()
+        self._data = new_data.copy()
 
     def get_data(self) -> pd.DataFrame:
         """
-        Method to get the data from the context.
+        Method to get the current state of the data.
         """
         return self._data
+
+    def reset_data(self):
+        """
+        Resets the data to its original state after file upload.
+        """
+        if self._original_data is not None:
+            self._data = self._original_data.copy()
+            return "Data has been reset to its original state."
+        return "No original data available to reset to."
+
+    def is_data_loaded(self) -> bool:
+        """
+        Checks if data has been loaded into the context.
+        """
+        return self._data is not None
 
 # Initialize the DataContext instance globally
 context = DataContext()
@@ -36,132 +59,213 @@ context = DataContext()
 @mcp.tool()
 def upload_file(path: str) -> str:
     """
-    This function read the csv data and stores it in the class variable.
+    Reads a CSV file from the given path and stores it in the context.
 
     Args:
-        Absolute path to the .csv file.
+        path (str): The absolute path to the .csv file.
 
     Returns:
-        String which shows the shape of the data.
+        str: A confirmation message with the shape of the loaded data or an error message.
     """
-
     if not os.path.exists(path):
         return f"Error: The file at '{path}' does not exist."
 
-    # Check if file has a .csv extension
     if not path.lower().endswith('.csv'):
         return "Error: The file must be a CSV file."
 
     try:
-        # Try to read the CSV file using pandas
         data = pd.read_csv(path)
-        
-        # Store the data in the DataContext class
         context.set_data(data)
-
-        # Store the shape of the data (rows, columns)
-        data_shape = context.get_data().shape
-
-        return f"Data successfully loaded. Shape: {data_shape}"
+        return f"Data successfully loaded. Shape: {data.shape}"
+    except pd.errors.EmptyDataError:
+        return "Error: The provided CSV file is empty."
     except Exception as e:
-        return f"An unexpected error occured: {str(e)}"
+        return f"An unexpected error occurred while reading the CSV: {str(e)}"
+
+@mcp.tool()
+def get_data_head(rows: int = 5) -> str:
+    """
+    Returns the first few rows of the dataset as a string.
+
+    Args:
+        rows (int): The number of rows to display.
+
+    Returns:
+        str: The first 'n' rows of the DataFrame or an error message.
+    """
+    if not context.is_data_loaded():
+        return "Error: No data loaded. Please use 'upload_file' first."
+    return context.get_data().head(rows).to_string()
+
+@mcp.tool()
+def get_info() -> str:
+    """
+    Provides a summary of the DataFrame, including data types and null values.
+
+    Returns:
+        str: A string containing the DataFrame's info.
+    """
+    if not context.is_data_loaded():
+        return "Error: No data loaded. Please use 'upload_file' first."
     
-@mcp.tool()
-def get_columns_info() -> str:
-    """
-    This function gives information about columns.
-
-    Returns:
-        String which contains column names.
-    """
-
-    columns = context.get_data().columns
-
-    return ", ".join(columns)
+    buffer = io.StringIO()
+    context.get_data().info(buf=buffer)
+    return buffer.getvalue()
 
 @mcp.tool()
-def check_category_columns() -> str:
+def preprocess_data() -> str:
     """
-    This function check if data has categorical columns.
+    Handles missing values in the dataset by imputing them.
+    - Fills numerical columns with the mean.
+    - Fills categorical columns with the mode.
+    
+    This operation modifies the data in context.
 
     Returns:
-        String which contains list of categorical columns.
+        str: A summary of the actions taken.
     """
+    if not context.is_data_loaded():
+        return "Error: No data loaded. Please use 'upload_file' first."
 
-    categorical_data = context.get_data().select_dtypes(include=["object", "category"])
+    data = context.get_data()
+    cols_changed = []
 
-    if not categorical_data.empty:
-        return f"Data has following categorical columns: {", ".join(categorical_data.columns.to_list())}"
-    else:
-        return f"Data has no categorical columns."
+    # Impute numerical columns
+    for col in data.select_dtypes(include=np.number).columns:
+        if data[col].isnull().sum() > 0:
+            data[col].fillna(data[col].mean(), inplace=True)
+            cols_changed.append(col)
 
+    # Impute categorical columns
+    for col in data.select_dtypes(include=['object', 'category']).columns:
+        if data[col].isnull().sum() > 0:
+            data[col].fillna(data[col].mode()[0], inplace=True)
+            cols_changed.append(col)
+
+    if not cols_changed:
+        return "No missing values found in the dataset."
+        
+    return f"Missing values handled in the following columns: {', '.join(cols_changed)}"
 
 @mcp.tool()
-def label_encode_categorical_columns() -> str:
+def encode_categorical_features(method: str = 'one_hot') -> str:
     """
-    This function label encodes all the categorical columns.
+    Encodes all categorical features using the specified method.
+    This operation modifies the data in context.
+
+    Args:
+        method (str): The encoding method to use ('one_hot' or 'label').
 
     Returns:
-        String which confirms success of encoding process.
+        str: A confirmation of the encoding operation.
     """
+    if not context.is_data_loaded():
+        return "Error: No data loaded. Please use 'upload_file' first."
 
-    categorical_columns = context.get_data().select_dtypes(include=["object", "category"]).columns
+    data = context.get_data()
+    categorical_cols = data.select_dtypes(include=['object', 'category']).columns
 
-    if len(categorical_columns) == 0:
+    if not len(categorical_cols):
         return "No categorical columns found to encode."
 
-    # Initialize the LabelEncoder
-    encoder = LabelEncoder()
+    if method == 'label':
+        encoder = LabelEncoder()
+        for col in categorical_cols:
+            data[col] = encoder.fit_transform(data[col])
+        msg = f"Label encoded the following columns: {', '.join(categorical_cols)}"
 
-    # Iterate over each categorical column and apply label encoding
-    for column in categorical_columns:
-        context.get_data()[column] = encoder.fit_transform(context.get_data()[column])
+    elif method == 'one_hot':
+        data = pd.get_dummies(data, columns=categorical_cols, drop_first=True)
+        context.set_data(data)
+        msg = f"One-hot encoded the categorical columns. New shape: {data.shape}"
 
-    return "All categorical columns have been label encoded successfully."
+    else:
+        return "Error: Invalid encoding method. Choose 'one_hot' or 'label'."
+
+    return msg
 
 @mcp.tool()
 def train_linear_regression_model(output_column: str) -> str:
     """
-    This function trains linear regression model.
+    Trains a linear regression model using a robust pipeline to prevent data leakage.
+    This function performs the following steps:
+    1. Identifies categorical and numerical features.
+    2. Splits the data into training and test sets.
+    3. Creates a preprocessing pipeline that scales numerical features and one-hot encodes categorical features.
+    4. Fits the pipeline on the training data and transforms both training and test sets.
+    5. Trains a Linear Regression model.
+    6. Evaluates the model on the test set and returns the Root Mean Squared Error (RMSE).
 
     Args:
-        Takes input for output column name.
+        output_column (str): The name of the target variable column.
 
     Returns:
-        String which contains the RMSE value.
+        str: The RMSE of the trained model or an error message.
     """
+    if not context.is_data_loaded():
+        return "Error: No data loaded. Please use 'upload_file' first."
 
     try:
-        data = context.get_data()
-
-        # Check if the output column exists in the dataset
+        # Use the original, unprocessed data for a clean training pipeline
+        data = context._original_data.copy()
+        
         if output_column not in data.columns:
             return f"Error: '{output_column}' column not found in the dataset."
 
-        # Prepare the features (X) and target variable (y)
-        X = data.drop(columns=[output_column])  # Drop the target column for features
-        y = data[output_column]  # The target variable is the output column
+        X = data.drop(columns=[output_column])
+        y = data[output_column]
 
-        # Split the data into training and test sets (80% train, 20% test)
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+        # Identify feature types
+        numerical_features = X.select_dtypes(include=np.number).columns.tolist()
+        categorical_features = X.select_dtypes(include=['object', 'category']).columns.tolist()
 
-        # Initialize the Linear Regression model
-        model = LinearRegression()
+        # Split data before any preprocessing
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        # Create preprocessing pipelines for numerical and categorical features
+        # This prevents data leakage by fitting transformers only on the training data
+        numeric_transformer = Pipeline(steps=[
+            ('scaler', StandardScaler())
+        ])
+
+        categorical_transformer = Pipeline(steps=[
+            ('onehot', OneHotEncoder(handle_unknown='ignore', drop='first'))
+        ])
+
+        # Create a preprocessor object using ColumnTransformer
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('num', numeric_transformer, numerical_features),
+                ('cat', categorical_transformer, categorical_features)
+            ],
+            remainder='passthrough'
+        )
+
+        # Create the full model pipeline
+        model_pipeline = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('regressor', LinearRegression())
+        ])
 
         # Train the model
-        model.fit(X_train, y_train)
+        model_pipeline.fit(X_train, y_train)
 
         # Predict on the test set
-        y_pred = model.predict(X_test)
+        y_pred = model_pipeline.predict(X_test)
 
-        # Calculate RMSE (Root Mean Squared Error)
+        # Calculate and return RMSE
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-
-        # Return the RMSE value
-        return f"Model trained successfully. RMSE: {rmse:.4f}"
+        return f"Model trained successfully using a robust pipeline. Test Set RMSE: {rmse:.4f}"
 
     except Exception as e:
-        return f"An error occurred while training the model: {str(e)}"
+        return f"An error occurred during model training: {str(e)}"
+
+def main():
+    """
+    Main function to run the FastMCP server.
+    """
+    print("Starting Linear Regression MCP Server...")
+    mcp.run()
 
 if __name__ == "__main__":
-    mcp.run()
+    main()
